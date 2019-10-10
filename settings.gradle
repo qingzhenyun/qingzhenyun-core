@@ -1,0 +1,12 @@
+rootProject.name = 'qingzhenyun-core'
+include 'qingzhenyun-common'
+include 'qingzhenyun-common-springboot'
+include 'qingzhenyun-ice-sb-common'
+include 'qingzhenyun-user-file'
+include 'qingzhenyun-common-jooq'
+include 'qingzhenyun-auto-config'
+include 'qingzhenyun-user-center'
+include 'qingzhenyun-ice-test'
+include 'qingzhenyun-cloud-store'
+include 'qingzhenyun-offline-download'
+

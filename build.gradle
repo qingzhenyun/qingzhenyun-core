@@ -1,0 +1,30 @@
+buildscript {
+    ext.kotlin_version = '1.2.71'
+}
+
+group 'com.qingzhenyun'
+version '1.0-SNAPSHOT'
+
+subprojects{
+    ext {
+        kotlin_version = '1.2.71'
+        springBootVersion = '2.0.3.RELEASE'
+        spring_version = '5.0.7.RELEASE'
+        junit_version = '4.12'
+        jvm_target = '1.8'
+        ice_version = '3.7.1'
+        slf4j_version = '1.7.25'
+        hikaricp_version = '3.2.0'
+        jooq_version = '3.11.2'
+        postgres_version = '42.2.3'
+        jooq_plugin_version = '3.0.1'
+        jackson_version = '2.9.6'
+        test_db_url = 'jdbc:postgresql://119.90.49.12:8999'
+        test_db_user = 'postgres'
+        test_db_password = 'e24a23c250246d795eaf08ddab6b0fa9'
+        test_db_user_file = 'qingzhenyun_file'
+        test_db_user_center = 'qingzhenyun_user_center'
+        test_db_cloud_store = 'qingzhenyun_cloud_store'
+        test_db_offline_download = 'qingzhenyun_offline_download'
+    }
+}

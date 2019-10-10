@@ -1,0 +1,38 @@
+buildscript {
+    //ext.kotlin_version = '1.2.30'
+
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+group 'com.qingzhenyun'
+version '1.0-SNAPSHOT'
+
+apply plugin: 'java'
+apply plugin: 'kotlin'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile project(':qingzhenyun-ice-sb-common')
+    compile group: 'com.zaxxer', name: 'HikariCP', version: hikaricp_version
+    compile group: 'org.postgresql', name: 'postgresql', version: postgres_version
+    compile group: 'org.jooq', name: 'jooq', version: jooq_version
+    compile group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: jackson_version
+
+}
+
+compileKotlin {
+    kotlinOptions.jvmTarget = jvm_target
+}
+compileTestKotlin {
+    kotlinOptions.jvmTarget = jvm_target
+}

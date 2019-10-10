@@ -1,0 +1,23 @@
+logging:
+  level:
+    com.qingzhenyun: info
+    org.springfromework.web: info
+    com.qingzhenyun.common: info
+  # file: /var/log/qingzhenyun/qingzhenyun-user-file.log
+spring:
+  #datasource:
+  #  continue-on-error: true
+  #  data-password: e24a23c250246d795eaf08ddab6b0fa9
+  #  data-username: postgres
+  #  driver-class-name: org.postgresql.Driver
+  #  url: jdbc:postgresql://119.90.49.12:8999/qingzhenyun-file
+  jooq:
+    sql-dialect: postgres
+  datasource:
+    continue-on-error: true
+    data-password: e24a23c250246d795eaf08ddab6b0fa9
+    data-username: postgres
+    password: e24a23c250246d795eaf08ddab6b0fa9
+    username: postgres
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://119.90.49.12:8999/qingzhenyun_offline_download

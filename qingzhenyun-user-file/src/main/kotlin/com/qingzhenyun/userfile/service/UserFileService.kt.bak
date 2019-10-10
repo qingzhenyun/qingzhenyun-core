@@ -1,0 +1,726 @@
+ private fun getDslContext(userId: Long, readOnly: Boolean = false): DSLContext {
+        if (userId > -1) {
+            return defaultDSLContext
+        }
+        if (readOnly) {
+            return defaultDSLContext
+        }
+        return defaultDSLContext
+    }
+
+    fun findRoot(userId: Long, otherDslContext: DSLContext? = null): UserFileRecord {
+        val dslContext = otherDslContext ?: getDslContext(userId)
+        val trustedPath = TrustedPath("")
+        val condition = Tables.USER_FILE.USER_ID.eq(userId).and(Tables.USER_FILE.UUID.eq(trustedPath.uuid))
+        val record = userFileRepository[condition, dslContext]
+        if (record != null) {
+            return record
+        }
+        val newRecord = userFileRepository.create(dslContext)
+        val current = System.currentTimeMillis()
+        newRecord.setUserId(userId).setSize(0)
+                .setAtime(current).setMtime(current).setCtime(current)
+                .setLft(1).setRgt(2)
+                .setName(UserFileConstants.ROOT_NAME).setLocking(false)
+                .setPath(trustedPath.path).setUuid(trustedPath.uuid)
+                .setParent("")
+                .setVersion(0).type = UserFileConstants.DIRECTORY_TYPE
+        newRecord.store()
+        return newRecord
+    }
+
+    fun getByParent(userId: Long,
+                    parent: String?,
+                    path: String?,
+                    name: String?, otherDslContext: DSLContext? = null): UserFileRecord? {
+        var root = ""
+        //1.check if there's parent
+        if (!parent.isNullOrEmpty()) {
+            val parentDirectory = this.getByUuid(userId, parent, otherDslContext)
+            if (parentDirectory != null) {
+                root = parentDirectory.path ?: ""
+            }
+        }
+        if (!path.isNullOrEmpty()) {
+            root += "/$path"
+        }
+
+        if (!name.isNullOrEmpty()) {
+            root += "/$name"
+        }
+        root = QStringUtil.formatPath(root)
+        return this.get(userId, null, root)
+    }
+
+    fun get(userId: Long, uuid: String?, path: String? = null, otherDslContext: DSLContext? = null): UserFileRecord? {
+        //val dslContext = getDslContext(userId)
+        if (uuid.isNullOrEmpty() && path.isNullOrEmpty()) {
+            return findRoot(userId)
+        }
+        if (!path.isNullOrEmpty()) {
+            return getByPath(userId, path, otherDslContext)
+        }
+        return getByUuid(userId, uuid, otherDslContext)
+    }
+
+    fun format(userId: Long): UserFileRecord {
+        deleteUserSpace(userId)
+        return findRoot(userId)
+    }
+
+    fun deleteUserSpace(userId: Long): Int {
+        val dslContext = getDslContext(userId)
+        val condition = Tables.USER_FILE.USER_ID.eq(userId)
+        val deleted = userFileRepository.delete(condition, dslContext)
+        LOGGER.info("User {} space deleted, {} file(s) affected.", userId, deleted)
+        return deleted
+    }
+
+    fun lockUserTableTest(userId: Long): Boolean {
+        return getDslContext(userId).transactionResult { configuration ->
+            // Lock user space
+            val dslContext = DSL.using(configuration)
+            dslContext.select(Tables.USER_FILE.UUID).from(Tables.USER_FILE).where(Tables.USER_FILE.USER_ID.eq(userId))
+                    .forUpdate().execute()
+            LOGGER.info("Locking user {} for 20 seconds", userId)
+            Thread.sleep(20 * 1000)
+            LOGGER.info("Unlock user {} ", userId)
+            return@transactionResult true
+        }
+    }
+
+    private fun getByPath(userId: Long, path: String?, otherDslContext: DSLContext? = null): UserFileRecord? {
+        if (path.isNullOrEmpty()) {
+            return findRoot(userId)
+        }
+        val trustedPath = TrustedPath(path!!)
+        if (trustedPath.isRoot()) {
+            return findRoot(userId)
+        }
+        val condition = Tables.USER_FILE.USER_ID.eq(userId).and(Tables.USER_FILE.UUID.eq(trustedPath.uuid))
+        return userFileRepository[condition, otherDslContext ?: getDslContext(userId)]
+    }
+
+    private fun getByUuid(userId: Long, uuid: String?, otherDslContext: DSLContext? = null): UserFileRecord? {
+        if (uuid == null || uuid.isEmpty()) {
+            return findRoot(userId)
+        }
+        val condition = Tables.USER_FILE.USER_ID.eq(userId).and(Tables.USER_FILE.UUID.eq(uuid))
+        val dslContext = otherDslContext ?: getDslContext(userId)
+        return userFileRepository[condition, dslContext]
+    }
+
+
+    /***
+     * Create File
+     */
+
+    fun createUserFileByPath(userFile: UserFile, otherDslContext: DSLContext? = null): UserFileRecord? {
+        return if (otherDslContext != null) {
+            createUserFileByPathInner(userFile, otherDslContext)
+        } else {
+            return getDslContext(userFile.userId).transactionResult { configuration ->
+                // Lock user space
+                val dslContext = DSL.using(configuration)
+                dslContext.select(Tables.USER_FILE.UUID).from(Tables.USER_FILE).where(Tables.USER_FILE.USER_ID.eq(userFile.userId))
+                        .forUpdate().execute()
+                return@transactionResult createUserFileByPathInner(userFile, dslContext)
+            }
+        }
+    }
+
+    fun createDirectory(userFile: UserFile): UserFileRecord? {
+        return createUserFile(userFile.setType(UserFileConstants.DIRECTORY_TYPE))
+    }
+
+    fun createFile(userFile: UserFile): UserFileRecord? {
+        return createUserFile(userFile.setType(UserFileConstants.FILE_TYPE))
+    }
+
+    fun move(userId: Long, uuid: String?, path: String?, destUuid: String?, destPath: String?): Int {
+        val dslContext = getDslContext(userId)
+        val sourceFile = get(userId, uuid, path, dslContext) ?: return 0
+        val destFile = get(userId, destUuid, destPath, dslContext) ?: return 0
+
+        if (destFile.type != UserFileConstants.DIRECTORY_TYPE) {
+            return 0
+        }
+        return this.moveOrCopyByPath(userId, sourceFile.path, destFile.path, false)
+    }
+
+    private fun createUserFile(userFile: UserFile): UserFileRecord? {
+        val parentUuid = userFile.parent
+        if (parentUuid.isNullOrEmpty()) {
+            return createUserFileByPath(userFile, getDslContext(userFile.userId))
+        } else {
+            return getDslContext(userFile.userId).transactionResult { configuration ->
+                // Lock whole tables
+                val dslContext = DSL.using(configuration)
+                dslContext.select(Tables.USER_FILE.UUID).from(Tables.USER_FILE).where(Tables.USER_FILE.USER_ID.eq(userFile.userId))
+                        .forUpdate().execute()
+                val parent = this.getByUuid(userFile.userId, parentUuid, dslContext)
+                if (parent != null && UserFileConstants.DIRECTORY_TYPE == parent.type) {
+                    if (userFile.path.isNullOrEmpty()) {
+                        userFile.path = parent.path + "/" + userFile.path
+                    } else {
+                        userFile.path = parent.path
+                    }
+                    //userFile.uuid = null
+                }
+                createUserFileByPathInner(userFile, dslContext)
+            }
+        }
+    }
+
+    fun delete(userId: Long, uuid: String?, path: String? = null): Int {
+        if (uuid.isNullOrEmpty() && path.isNullOrEmpty()) {
+            return 0
+        }
+        return deleteUserFile(UserFile().setUuid(uuid).setPath(path).setUserId(userId))
+    }
+
+    fun deleteUserFile(userFile: UserFile): Int {
+        return getDslContext(userFile.userId).transactionResult { configuration ->
+            // Lock whole tables
+            val dslContext = DSL.using(configuration)
+            dslContext.select(Tables.USER_FILE.UUID).from(Tables.USER_FILE).where(Tables.USER_FILE.USER_ID.eq(userFile.userId))
+                    .forUpdate().execute()
+            // find  ...
+            if (!userFile.path.isNullOrEmpty()) {
+                // find it
+                val tPath = TrustedPath(userFile.path)
+                if (!tPath.isRoot()) {
+                    val rec = this.getByPath(userFile.userId, tPath.path, dslContext)
+                    if (rec != null) {
+                        return@transactionResult deleteUserFileInner(rec.into(UserFile::class.java), dslContext)
+                    }
+                }
+            } else {
+                if (!userFile.uuid.isNullOrEmpty()) {
+                    val rec = this.getByUuid(userFile.userId, userFile.uuid, dslContext)
+                    if (rec != null) {
+                        return@transactionResult deleteUserFileInner(rec.into(UserFile::class.java), dslContext)
+                    }
+                }
+            }
+            return@transactionResult 0
+        }
+    }
+
+    fun countChildren(userFile: UserFile): Int {
+        val count = (userFile.rgt - userFile.lft + 1) / 2
+        if (count < 0) {
+            return 0
+        }
+        return count
+    }
+
+    fun countChildren(userFile: UserFileRecord): Int {
+        val count = (userFile.rgt - userFile.lft + 1) / 2
+        if (count < 0) {
+            return 0
+        }
+        return count
+    }
+
+    private fun createUserFileByPathInner(userFile: UserFile, dslContext: DSLContext): UserFileRecord? {
+        val prev = (userFile.path ?: "") + (if (userFile.name.isNullOrEmpty()) "" else "/${userFile.name}")
+        val checkPath = TrustedPath(prev)
+        if (checkPath.isRoot()) {
+            return findRoot(userFile.userId, dslContext)
+        }
+        userFile.path = checkPath.path
+        userFile.uuid = checkPath.uuid
+        // Clear name,
+        userFile.name = ""
+        // user file exists?
+        val userFileByPath = this.getByPath(userFile.userId, userFile.path, dslContext)
+        if (userFileByPath != null) {
+            return if (UserFileConstants.DIRECTORY_TYPE == userFile.type) {
+                userFileByPath
+            } else {
+                if (userFile.version != null && userFile.version > 0) {
+                    //Auto rename
+                    userFile.version = 0
+                    userFile.name = "${QStringUtil.getFileName(userFile.path)}.rename.${System.currentTimeMillis()}.${QStringUtil.getFileExt(userFile.path)}"
+                    createUserFileByPathInner(userFile, dslContext)
+                } else {
+                    userFileByPath
+                }
+            }
+        } else {
+            // now, check it's parent directory.
+            val parentDirPath = QStringUtil.getFileParentPath(userFile.path)
+            // check parent directory exist
+            var parentDirectory = this.getByPath(userFile.userId, parentDirPath, dslContext)
+            if (parentDirectory != null) {
+                // Create new...
+                if (UserFileConstants.DIRECTORY_TYPE != parentDirectory.type) {
+                    //
+                    LOGGER.warn("User {} path : {} ({})should be a directory but is a file, operation skipped.",
+                            userFile.userId, parentDirPath, parentDirectory.uuid)
+                    return null
+                }
+
+            } else {
+                // create new directory..
+                val parentDirectoryPojo = UserFile()
+                        .setPath(parentDirPath)
+                        .setUserId(userFile.userId)
+                        .setName("")
+                        .setSize(0)
+                        .setType(UserFileConstants.DIRECTORY_TYPE)
+                        .setVersion(0)
+                parentDirectory = createUserFileByPathInner(parentDirectoryPojo, dslContext)
+            }
+            if (parentDirectory == null) {
+                LOGGER.warn("{} null, return null", parentDirPath)
+                return null
+            }
+            return addUserFileNodeOnParent(parentDirectory, userFile, dslContext)
+
+        }
+
+        //this.getByPath(userFile.userId)
+    }
+
+    private fun addUserFileNodeOnParent(parentDirectory: UserFileRecord, newFile: UserFile, dslContext: DSLContext): UserFileRecord {
+        val ext = if (UserFileConstants.DIRECTORY_TYPE == newFile.type) null else QStringUtil.getFileExt(newFile.path)
+        val filename = QStringUtil.getFileName(newFile.path)
+        val current = System.currentTimeMillis()
+        newFile.setExt(ext).setName(filename).setParent(parentDirectory.uuid)
+                .setAtime(current).setCtime(current).setLocking(false).version = 0
+
+        val left = parentDirectory.lft
+        dslContext.batch(
+                dslContext.update(Tables.USER_FILE)
+                        .set(Tables.USER_FILE.LFT, Tables.USER_FILE.LFT.add(2))
+                        .where(Tables.USER_FILE.LFT.gt(left).and(Tables.USER_FILE.USER_ID.eq(newFile.userId)))
+                ,
+                dslContext.update(Tables.USER_FILE)
+                        .set(Tables.USER_FILE.RGT, Tables.USER_FILE.RGT.add(2))
+                        .where(Tables.USER_FILE.RGT.gt(left).and(Tables.USER_FILE.USER_ID.eq(newFile.userId)))
+
+
+        ).execute()
+        newFile.setLft(left + 1).rgt = left + 2
+        return userFileRepository.create(newFile, otherDslContext = dslContext)
+    }
+
+
+    private fun deleteUserFileInner(userFile: UserFile, dslContext: DSLContext): Int {
+        val left = userFile.lft
+        val right = userFile.rgt
+        // Calculate node width (Node count is [right - width + 1] / 2), because node has lft and rgt
+        //
+        val width = right - left + 1
+        // SQL Like 'SELECT @myLeft := lft, @myRight := rgt, @myWidth := rgt - lft + 1 WHERE...'
+
+        // Delete node itself and children
+        dslContext.deleteFrom(Tables.USER_FILE).where(Tables.USER_FILE.LFT.between(left, right).and(Tables.USER_FILE.USER_ID.eq(userFile.userId))).execute()
+        // SQL Like 'DELETE FROM ... WHERE lft BETWEEN @myLeft AND @myRight'
+
+        // Recover parent nodes. Reverse operation of add nodes.
+        dslContext.batch(
+                dslContext.update(Tables.USER_FILE)
+                        .set(Tables.USER_FILE.RGT, Tables.USER_FILE.RGT.minus(width))
+                        .where(Tables.USER_FILE.RGT.gt(right).and(Tables.USER_FILE.USER_ID.eq(userFile.userId))),
+                dslContext.update(Tables.USER_FILE)
+                        .set(Tables.USER_FILE.LFT, Tables.USER_FILE.LFT.minus(width))
+                        .where(Tables.USER_FILE.LFT.gt(right).and(Tables.USER_FILE.USER_ID.eq(userFile.userId)))
+        ).execute()
+        // UPDATE ... SET rgt = rgt - @myWidth WHERE rgt > @myRight;
+        // UPDATE ... SET lft = lft - @myWidth WHERE lft > @myRight;
+        return width / 2
+    }
+
+
+    fun moveOrCopyByPath(userId: Long, source: String, destination: String, copy: Boolean, otherDslContext: DSLContext? = null): Int {
+        return if (otherDslContext != null) {
+            moveOrCopyByPathInner(userId, source, destination, copy, otherDslContext)
+        } else {
+            // var result = 0
+            return getDslContext(userId).transactionResult { configuration ->
+                // Lock whole tables
+                val dslContext = DSL.using(configuration)
+                dslContext.select(Tables.USER_FILE.UUID).from(Tables.USER_FILE).where(Tables.USER_FILE.USER_ID.eq(userId))
+                        .forUpdate().execute()
+                return@transactionResult moveOrCopyByPathInner(userId, source, destination, copy, dslContext)
+            }
+            // result
+        }
+    }
+
+    private fun moveOrCopyByPathInner(userId: Long, source: String, destination: String, copy: Boolean, dslContext: DSLContext): Int {
+        val sourceNode = this.getByPath(userId, source, dslContext)
+        if (sourceNode == null) {
+            LOGGER.warn("Move ::{} : {} failed, source cannot found.", userId, source)
+            return 0
+        }
+
+        val destNode = this.getByPath(userId, destination, dslContext)
+        if (destNode == null) {
+            LOGGER.warn("Move ::{} : {} failed, destination cannot found.", userId, destination)
+            return 0
+        }
+        if (UserFileConstants.DIRECTORY_TYPE != destNode.type) {
+            LOGGER.warn("Move ::{} : {} failed, destination is not a directory.", userId, destination)
+            return 0
+        }
+        return moveOrCopyInternal(sourceNode, destNode, copy, dslContext)
+    }
+
+
+    /*
+    fun removeInner(userId: Long, uuid: String?, path: String?,dslContext: DSLContext):Boolean{
+        val source = this.get(userId, uuid, path)
+        if (source == null) {
+            LOGGER.warn("Move ::{} : {} {} failed, source cannot found.", userId, uuid, path)
+            return false
+        }
+        this.delete(userId, uuid, path)
+    }
+    */
+    fun rename(userId: Long, uuid: String?, path: String?, newName: String, otherDslContext: DSLContext? = null): UserFileRecord? {
+        return if (otherDslContext != null) {
+            renameInner(userId, uuid, path, newName, otherDslContext)
+        } else {
+            // var result = 0
+            return getDslContext(userId).transactionResult { configuration ->
+                // Lock whole tables
+                val dslContext = DSL.using(configuration)
+                dslContext.select(Tables.USER_FILE.UUID).from(Tables.USER_FILE).where(Tables.USER_FILE.USER_ID.eq(userId))
+                        .forUpdate().execute()
+                return@transactionResult renameInner(userId, uuid, path, newName, dslContext)
+            }
+            // result
+        }
+    }
+
+    private fun renameInner(userId: Long, uuid: String?, path: String?, newName: String, dslContext: DSLContext): UserFileRecord? {
+        val source = this.get(userId, uuid, path)
+        if (source == null) {
+            LOGGER.warn("Move ::{} : {} {} failed, source cannot found.", userId, uuid, path)
+            return null
+        }
+        return renameInternal(source, newName, dslContext)
+    }
+
+    private fun renameInternal(source: UserFileRecord, newName: String, dslContext: DSLContext): UserFileRecord? {
+        val parent = this.getByUuid(source.userId, source.parent, dslContext)
+        if (parent == null) {
+            LOGGER.warn("User {} File {} () cannot find parent, need to fix", source.userId, source.path, source.uuid)
+            return source
+        }
+        // val oldPath = source.path
+        val trustedNewName = TrustedPath(newName)
+        if (trustedNewName.path.isEmpty()) {
+            LOGGER.warn("User {} File {} () trying to rename to an illegal name (empty) {}", source.userId, source.path, newName)
+            return source
+        }
+        val trustedNewNameW = trustedNewName.path.substring(1)
+
+        if (trustedNewNameW.indexOf('/') != -1 || trustedNewNameW.isEmpty() || trustedNewNameW.length > 256) {
+            LOGGER.warn("User {} File {} () trying to rename to an illegal name {}", source.userId, source.path, newName)
+            return source
+        }
+        val newPath = parent.path + '/' + trustedNewNameW
+        val check = this.get(source.userId, "", newPath, dslContext)
+        if (check != null) {
+            LOGGER.warn("File {} in {} already existed", newPath, source.userId)
+            return source
+        }
+        // new path
+        val trustedNewPath = TrustedPath(newPath)
+        // source.path -> trustedNewPath.path
+        // LOGGER.info("Start replace..{} -> {} [{},{}] - {}", source.path , trustedNewPath.path, source.lft, source.rgt, source.userId)
+        val tempData: List<UserFileRecord> = dslContext.selectFrom(Tables.USER_FILE).where(Tables.USER_FILE.LFT.between(source.lft, source.rgt)
+                .and(Tables.USER_FILE.USER_ID.eq(source.userId)))
+                .orderBy(Tables.USER_FILE.LFT.asc()).fetch()
+        for (data in tempData) {
+            val cPath = data.path.replaceFirst(source.path, trustedNewPath.path)
+            val trustedPath = TrustedPath(cPath)
+            // LOGGER.info("Change path {} to {}", data.path , trustedPath.path)
+            data.path = trustedPath.path
+            data.uuid = trustedPath.uuid
+        }
+
+        dslContext.batchUpdate(tempData).execute()
+        source.name = trustedNewNameW
+        source.uuid = trustedNewPath.uuid
+        source.path = trustedNewPath.path
+        if (source.type != UserFileConstants.DIRECTORY_TYPE) {
+            val ext = QStringUtil.getFileExt(trustedNewPath.path)
+            source.ext = ext
+        }
+        source.update()
+        return source
+    }
+
+
+    private fun moveOrCopyInternal(source: UserFileRecord, destination: UserFileRecord, copy: Boolean, dslContext: DSLContext): Int {
+        // Must in transaction and lock user tables!
+        // var result = 0
+        val parent = this.getByUuid(source.userId, source.parent, dslContext)
+        if (parent == null) {
+            LOGGER.warn("User {} File {} () cannot find parent, need to fix", source.userId, source.path, source.uuid)
+            return 0
+        }
+        // First, check if destination is not a child node on source
+        if (destination.userId != source.userId) {
+            return 0
+        }
+        if (destination.lft > source.lft && destination.rgt < source.rgt) {
+            // loop detected, move/copy failed
+            return 0
+        }
+        if (UserFileConstants.DIRECTORY_TYPE != destination.type) {
+            LOGGER.warn("User {} File {} () is a directory, operation canceled", destination.userId, destination.path, destination.uuid)
+            return 0
+        }
+        // Get nodes to move/copy.
+        val parentMap = HashMap<String, String>()
+        parentMap[source.uuid] = destination.uuid
+        val tempData: List<UserFileRecord> = dslContext.selectFrom(Tables.USER_FILE).where(Tables.USER_FILE.LFT.between(source.lft, source.rgt)
+                .and(Tables.USER_FILE.USER_ID.eq(source.userId)))
+                .orderBy(Tables.USER_FILE.LFT.asc()).fetch()
+        // if not copy, delete temp data.
+        val width = source.rgt - source.lft + 1
+        // if(!copy){
+        //     dslContext.batch(
+        //             dslContext.update(Tables.USER_FILE)
+        //                    .set(Tables.USER_FILE.RGT,Tables.USER_FILE.RGT.minus(width))
+        //                     .where(Tables.USER_FILE.RGT.gt(source.rgt).and(Tables.USER_FILE.USER_ID.eq(source.userId))),
+        //             dslContext.update(Tables.USER_FILE)
+        //                     .set(Tables.USER_FILE.LFT,Tables.USER_FILE.LFT.minus(width))
+        //                     .where(Tables.USER_FILE.LFT.gt(source.lft).and(Tables.USER_FILE.USER_ID.eq(source.userId)))
+        //     ).execute()
+        // } else{
+        dslContext.batch(
+                dslContext.update(Tables.USER_FILE)
+                        .set(Tables.USER_FILE.LFT, Tables.USER_FILE.LFT.add(width))
+                        .where(Tables.USER_FILE.LFT.gt(destination.lft).and(Tables.USER_FILE.USER_ID.eq(source.userId)))
+                ,
+                dslContext.update(Tables.USER_FILE)
+                        .set(Tables.USER_FILE.RGT, Tables.USER_FILE.RGT.add(width))
+                        .where(Tables.USER_FILE.RGT.gt(destination.lft).and(Tables.USER_FILE.USER_ID.eq(source.userId)))
+        ).execute()
+        // }
+        // Confirm destination
+        val destinationNode = this.getByUuid(source.userId, destination.uuid, dslContext)
+        val diff = source.lft - destinationNode!!.lft - 1
+
+        for (data in tempData) {
+            //if(copy){
+
+            data.lft = data.lft - diff
+            data.rgt = data.rgt - diff
+            val newPath = data.path.replaceFirst(parent.path, destination.path)
+            val trustedPath = TrustedPath(newPath)
+            data.path = trustedPath.path
+            parentMap[data.uuid] = trustedPath.uuid
+            data.uuid = trustedPath.uuid
+            //}
+        }
+
+        for (data in tempData) {
+            // parentMap = HashMap<String,String>()
+            val parentChange = parentMap[data.parent]
+            if (parentChange != null) {
+                data.parent = parentChange
+            }
+        }
+
+        // Add Temp Node data
+        dslContext.batchInsert(tempData).execute()
+        if (!copy) {
+
+            deleteUserFileInner(this
+                    .getByUuid(source.userId, source.uuid, dslContext)!!.into(UserFile::class.java)
+                    , dslContext)
+        }
+        return tempData.count()
+    }
+
+    /**
+     * List file
+     */
+
+    fun <T> listDirectoryPage(userId: Long, uuid: String?, type: Int, page: Int, pageSize: Int, orderBy: Int, clazz: Class<T>): RecordPage<T> {
+        val dslContext = this.getDslContext(userId)
+        var condition = Tables.USER_FILE.USER_ID.eq(userId).and(Tables.USER_FILE.PARENT.eq(uuid))
+        if (type > -1) {
+            condition = condition.and(Tables.USER_FILE.TYPE.eq(type))
+        }
+        var orderByCondition: SortField<*> = Tables.USER_FILE.LFT.desc()
+        if (orderBy == 1) {
+            orderByCondition = Tables.USER_FILE.LFT.asc()
+        } else if (orderBy == 2) {
+            orderByCondition = Tables.USER_FILE.NAME.asc()
+        }
+        return this.userFileRepository.getPage(page, pageSize, clazz, orderByCondition, condition, dslContext)
+
+    }
+
+    fun <T> listDirectory(userId: Long, uuid: String?, type: Int, start: Int, size: Int, orderBy: Int, clazz: Class<T>): List<T> {
+        val dslContext = this.getDslContext(userId)
+        var condition = Tables.USER_FILE.USER_ID.eq(userId).and(Tables.USER_FILE.PARENT.eq(uuid))
+        if (type > -1) {
+            condition = condition.and(Tables.USER_FILE.TYPE.eq(type))
+        }
+        var orderByCondition: SortField<*> = Tables.USER_FILE.LFT.desc()
+        if (orderBy == 1) {
+            orderByCondition = Tables.USER_FILE.LFT.asc()
+        } else if (orderBy == 2) {
+            orderByCondition = Tables.USER_FILE.NAME.asc()
+        }
+        return userFileRepository.getList(start, size, clazz, orderByCondition, condition, dslContext)
+    }
+
+    /***
+     * Base
+     */
+
+    fun validateUserFile(userId: Long): Boolean {
+        // find root first
+        val dslContext = getDslContext(userId)
+        val root = this.findRoot(userId, dslContext)
+        val rootQuery = dslContext.selectFrom(Tables.USER_FILE).where(Tables.USER_FILE.PARENT.eq("")
+                .and(Tables.USER_FILE.USER_ID.eq(userId))).fetch()
+        if (rootQuery.size != 1) {
+            LOGGER.warn("Failed to validate root, root count {}", rootQuery.size)
+            return false
+        }
+        val rootFile = rootQuery[0]!!
+        if (root.uuid != rootFile.uuid) {
+            LOGGER.warn("root uuid not match, {} - {}", root.uuid, rootFile.uuid)
+            return false
+        }
+
+        LOGGER.info("root lft {}", root.lft)
+        var currentWorking = root.lft
+        var currentIsLeft = true
+        var lastNode = root
+        var switching = false
+        currentWorking += 1
+        if (currentWorking == root.rgt) {
+            LOGGER.info("Empty root")
+            //TODO validate if empty
+            return true
+        }
+
+        val files = mutableSetOf<String>(root.uuid)
+
+
+        while (currentIsLeft || currentWorking != root.rgt) {
+            val currentQuery = if (currentIsLeft) {
+                dslContext.selectFrom(Tables.USER_FILE).where(Tables.USER_FILE.LFT.eq(currentWorking)
+                        .and(Tables.USER_FILE.USER_ID.eq(userId))).fetch()
+            } else {
+                dslContext.selectFrom(Tables.USER_FILE).where(Tables.USER_FILE.RGT.eq(currentWorking)
+                        .and(Tables.USER_FILE.USER_ID.eq(userId))).fetch()
+            }
+
+            if (currentQuery.size != 1) {
+                if (currentQuery.isEmpty()) {
+                    if (switching) {
+                        LOGGER.warn("Cannot find node {},{},[{}]", currentWorking, currentIsLeft, userId)
+                        return false
+                    }
+                    switching = true
+                    currentIsLeft = !currentIsLeft
+                    continue
+                } else {
+                    LOGGER.warn("Current Node {} next node not one", lastNode.uuid)
+                    return false
+                }
+
+            }
+
+            val queryFile = currentQuery[0]!!
+            files.add(queryFile.uuid)
+            LOGGER.info("Checking file {}, {}", userId, queryFile.path)
+            if (TrustedPath(queryFile.path).uuid != queryFile.uuid) {
+                LOGGER.warn("{} : {} path id error", userId, queryFile.uuid)
+                return false
+            }
+            if (switching) {
+                if (lastNode.parent != queryFile.parent) {
+                    LOGGER.warn("parent not match(Switch) {},{},{} [{} -{}]", currentWorking, currentIsLeft, userId, lastNode.parent, queryFile.parent)
+                    return false
+                }
+                switching = false
+                currentWorking += 1
+                lastNode = queryFile
+                continue
+            }
+
+            //fileCount += 1
+            // validate parent
+            if (currentIsLeft) {
+                if (queryFile.parent != lastNode.uuid) {
+                    LOGGER.warn("parent not match(LFT) {},{},{} [{} -{}]", currentWorking, currentIsLeft, userId, lastNode.parent, queryFile.parent)
+                    return false
+                }
+                // validate path
+                if (TrustedPath(lastNode.path + '/' + queryFile.name).path != queryFile.path) {
+                    LOGGER.warn("parent path not match(LFT) {},{},{} [{} -{}]", currentWorking, currentIsLeft, userId, lastNode.parent, queryFile.parent)
+                    return false
+                }
+
+            } else {
+                if (queryFile.uuid != lastNode.parent) {
+                    LOGGER.warn("parent not match(RGT) {},{},{} [{} -{}]", currentWorking, currentIsLeft, userId, lastNode.parent, queryFile.parent)
+                    return false
+                }
+                if (TrustedPath(queryFile.path + '/' + lastNode.name).path != lastNode.path) {
+                    LOGGER.warn("parent path not match(RGT) {},{},{} [{} -{}]", currentWorking, currentIsLeft, userId, lastNode.parent, queryFile.parent)
+                    return false
+                }
+
+                //validate path
+
+            }
+            lastNode = queryFile
+            currentWorking += 1
+
+            // move to next node
+        }
+
+        val rootFileCount = (root.rgt - root.lft + 1) / 2
+
+        if (rootFileCount != files.size) {
+            LOGGER.warn("File size not math {} - {}", rootFileCount, files.size)
+            return false
+        }
+
+
+        // walk all
+        //var currentUuid = root.uuid
+        val fileCount = walkAndCountClildren(userId, root.uuid, 0, dslContext) + 1
+        if (rootFileCount != fileCount) {
+            LOGGER.warn("Root File size not math {} - {}", rootFileCount, fileCount)
+            return false
+        }
+        return true
+
+    }
+
+    private fun walkAndCountClildren(userId: Long, uuid: String, count: Int, dslContext: DSLContext): Int {
+        val childrenResult = getChildren(userId, uuid, dslContext)
+        var cCount = count
+        val parentRecord = getByUuid(userId, uuid, dslContext)
+        LOGGER.info("Walk {} ", parentRecord!!.path)
+        cCount += childrenResult.size
+        if (childrenResult.size > 0) {
+            for (child in childrenResult) {
+                cCount = walkAndCountClildren(userId, child.uuid, cCount, dslContext)
+            }
+        }
+        return cCount
+    }
+
+    private fun getChildren(userId: Long, parent: String, dslContext: DSLContext): Result<UserFileRecord> {
+        return dslContext.selectFrom(Tables.USER_FILE).where(Tables.USER_FILE.PARENT.eq(parent)
+                .and(Tables.USER_FILE.USER_ID.eq(userId))).fetch()
+    }

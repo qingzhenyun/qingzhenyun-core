@@ -1,0 +1,35 @@
+buildscript {
+
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+group 'com.qingzhenyun'
+version '1.0-SNAPSHOT'
+
+apply plugin: 'java'
+apply plugin: 'kotlin'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile project(':qingzhenyun-common')
+    compile "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
+    testCompile group: 'junit', name: 'junit', version: junit_version
+    compile "org.springframework.boot:spring-boot:${springBootVersion}"
+}
+
+compileKotlin {
+    kotlinOptions.jvmTarget = jvm_target
+}
+compileTestKotlin {
+    kotlinOptions.jvmTarget = jvm_target
+}
